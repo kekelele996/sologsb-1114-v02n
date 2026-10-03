@@ -6,12 +6,14 @@ import { caveStore } from '@/stores/caveStore'
 import { segmentStore } from '@/stores/segmentStore'
 import { stationStore } from '@/stores/stationStore'
 import { sketchStore } from '@/stores/sketchStore'
+import { reconcileStore } from '@/stores/reconcileStore'
 
 const route = useRoute()
 const caveState = useStore(caveStore)
 const segmentState = useStore(segmentStore)
 const stationState = useStore(stationStore)
 const sketchState = useStore(sketchStore)
+const reconcileState = useStore(reconcileStore)
 
 const menus = [
   { path: '/caves', label: '洞穴清单', icon: 'Files' },
@@ -27,7 +29,8 @@ const stats = computed(() => [
   { label: '洞穴', value: caveState.caves.filter((cave) => !cave.archived).length },
   { label: '洞段', value: segmentState.segments.length },
   { label: '测点', value: stationState.stations.length },
-  { label: '草图', value: sketchState.sketches.length }
+  { label: '草图', value: sketchState.sketches.length },
+  { label: '待重配图幅', value: reconcileState.pendingSketches.length }
 ])
 
 onMounted(async () => {
@@ -35,6 +38,9 @@ onMounted(async () => {
   await segmentStore.getState().hydrate()
   await stationStore.getState().hydrate()
   await sketchStore.getState().hydrate()
+  // 旧数据升级后：按锚点回填没记所属区间的草图，再刷新待重配列表
+  await reconcileStore.getState().backfillOrphans()
+  await reconcileStore.getState().refresh()
 })
 </script>
 

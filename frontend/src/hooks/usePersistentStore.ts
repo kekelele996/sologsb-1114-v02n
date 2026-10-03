@@ -3,9 +3,10 @@ import type { StoreApi } from 'zustand/vanilla'
 import Dexie, { type Table } from 'dexie'
 import type { Cave, Segment, Sketch, Station } from '@/types'
 import { computeHorizontal, computeVertical } from '@/utils/survey'
+import { anchorInSegment } from '@/utils/reconcile'
 
 /** IndexedDB 数据结构版本号（升级迁移时使用） */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export interface MetaRow {
   key: string
@@ -30,7 +31,7 @@ class CaveSurveyDb extends Dexie {
       meta: 'key'
     })
     // v2：旧版测点记录缺少水平距/垂距，迁移时由斜距 + 倾角补齐
-    this.version(SCHEMA_VERSION)
+    this.version(2)
       .stores({
         caves: 'id, name, region, archived',
         segments: 'id, caveId, code, type',
@@ -48,6 +49,41 @@ class CaveSurveyDb extends Dexie {
             }
             if (!Number.isFinite(station.verticalDistance)) {
               station.verticalDistance = computeVertical(station.dip, station.slopeDistance)
+            }
+          })
+      })
+    // v3：草图图幅自己存对齐偏移与重配状态；旧草图没记所属区间，升级时按锚点回填 segmentId，回填不上的单独留着
+    this.version(SCHEMA_VERSION)
+      .stores({
+        caves: 'id, name, region, archived',
+        segments: 'id, caveId, code, type',
+        stations: 'id, segmentId, code, date',
+        sketches: 'id, segmentId, code, mergeOrder',
+        meta: 'key'
+      })
+      .upgrade(async (tx) => {
+        const segments = await tx.table<Segment, string>('segments').toArray()
+        await tx
+          .table<Sketch, string>('sketches')
+          .toCollection()
+          .modify((sketch) => {
+            if (sketch.alignOffset === undefined || sketch.alignOffset === null) {
+              sketch.alignOffset = 0
+            }
+            if (!sketch.reconcileStatus) {
+              sketch.reconcileStatus = 'ok'
+            }
+            if (!sketch.segmentId) {
+              const match = segments.find((segment) => anchorInSegment(sketch.anchorStake, segment))
+              if (match) {
+                sketch.segmentId = match.id
+                sketch.reconcileStatus = 'ok'
+                sketch.reconcileReason = ''
+              } else {
+                // 回填不上的单独留着，等重配
+                sketch.reconcileStatus = 'pending'
+                sketch.reconcileReason = '旧数据未记录所属区间，按锚点回填失败，待重配'
+              }
             }
           })
       })
@@ -197,6 +233,9 @@ export async function seedDemoData(): Promise<void> {
       author: '陆昀',
       mergeOrder: 1,
       anchorStake: 'K0+000',
+      alignOffset: 0,
+      reconcileStatus: 'ok',
+      reconcileReason: '',
       imageNote: '平面展开草图，坐标纸 48 格，含左壁支护标注'
     },
     {
@@ -208,6 +247,9 @@ export async function seedDemoData(): Promise<void> {
       author: '覃羽',
       mergeOrder: 2,
       anchorStake: 'K0+120',
+      alignOffset: 0,
+      reconcileStatus: 'ok',
+      reconcileReason: '',
       imageNote: '竖井剖面草图，标注三处锚点'
     }
   ])

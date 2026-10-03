@@ -9,6 +9,8 @@ export interface SketchState {
   save: (sketch: Sketch) => Promise<void>
   remove: (id: string) => Promise<void>
   reorder: (orderedIds: string[]) => Promise<void>
+  /** 批量持久化图幅对齐偏移（图幅自己存锚点与偏移） */
+  persistOffsets: (updates: { id: string; alignOffset: number }[]) => Promise<void>
 }
 
 export const sketchStore = createStore<SketchState>((set, get) => ({
@@ -36,5 +38,18 @@ export const sketchStore = createStore<SketchState>((set, get) => ({
       })
     )
     await get().hydrate()
+  },
+  persistOffsets: async (updates) => {
+    const all = get().sketches
+    const rows = updates
+      .map((update) => {
+        const target = all.find((item) => item.id === update.id)
+        return target ? { ...target, alignOffset: update.alignOffset } : null
+      })
+      .filter((row): row is Sketch => row !== null)
+    if (rows.length > 0) {
+      await db.sketches.bulkPut(rows)
+      await get().hydrate()
+    }
   }
 }))

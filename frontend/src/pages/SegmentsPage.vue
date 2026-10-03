@@ -8,6 +8,7 @@ import { useStore } from '@/hooks/usePersistentStore'
 import { caveStore } from '@/stores/caveStore'
 import { segmentStore } from '@/stores/segmentStore'
 import { stationStore } from '@/stores/stationStore'
+import { reconcileStore } from '@/stores/reconcileStore'
 import { stakeRangeOverlap, stakeToNumber } from '@/utils/survey'
 import { uid } from '@/utils/id'
 
@@ -124,9 +125,25 @@ async function submit(): Promise<void> {
     closed: form.closed,
     sketchNo: form.sketchNo.trim()
   }
+  const stakesChanged =
+    !!existing && (existing.startStake !== segment.startStake || existing.endStake !== segment.endStake)
   await segmentStore.getState().save(segment)
+  if (stakesChanged) {
+    // 桩号改动：区间里的测点照旧算闭合差，只把锚点落区间外的图幅挑出来等重配
+    const count = await reconcileStore.getState().invalidateSegmentSketches(segment.id)
+    if (count > 0) {
+      ElMessage.warning(`桩号已更新，${count} 张图幅锚点落区间外，已挑出待重配（测点闭合差不受影响）`)
+    } else {
+      ElMessage.success('洞段已更新，图幅锚点均在区间内')
+    }
+  } else if (!existing) {
+    // 新建洞段：顺手给没记所属区间的旧草图按锚点回填
+    const { matched } = await reconcileStore.getState().backfillOrphans()
+    ElMessage.success(matched > 0 ? `洞段已建立，并按锚点回填 ${matched} 张旧草图` : '洞段已建立')
+  } else {
+    ElMessage.success('洞段已更新')
+  }
   dialogVisible.value = false
-  ElMessage.success(existing ? '洞段已更新' : '洞段已建立')
 }
 
 async function applyBatchType(): Promise<void> {

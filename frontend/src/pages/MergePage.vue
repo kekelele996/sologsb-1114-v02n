@@ -11,6 +11,7 @@ import { caveStore } from '@/stores/caveStore'
 import { segmentStore } from '@/stores/segmentStore'
 import { stationStore } from '@/stores/stationStore'
 import { sketchStore } from '@/stores/sketchStore'
+import { reconcileStore } from '@/stores/reconcileStore'
 import { downloadCsv } from '@/utils/export'
 import { stakeToNumber } from '@/utils/survey'
 
@@ -23,6 +24,7 @@ const caveState = useStore(caveStore)
 const segmentState = useStore(segmentStore)
 const stationState = useStore(stationStore)
 const sketchState = useStore(sketchStore)
+const reconcileState = useStore(reconcileStore)
 
 const selectedCaveId = ref<string>(caveState.caves[0]?.id ?? '')
 const draggingId = ref<string | null>(null)
@@ -33,6 +35,11 @@ const snapLog = ref<string[]>([])
 const offsets = reactive<Record<string, number>>({})
 const snapped = reactive<Record<string, boolean>>({})
 
+/** 待重配图幅（锚点落区间外 / 旧数据未回填）：不参与锚点吸附，等重配 */
+const pendingIds = computed<Set<string>>(
+  () => new Set(reconcileState.pendingSketches.map((sketch) => sketch.id))
+)
+
 const caveSegments = computed(() =>
   segmentState.segments.filter((segment) => !selectedCaveId.value || segment.caveId === selectedCaveId.value)
 )
@@ -42,6 +49,27 @@ const mergeSketches = computed<Sketch[]>(() =>
     .filter((sketch) => caveSegments.value.some((segment) => segment.id === sketch.segmentId))
     .sort((a, b) => a.mergeOrder - b.mergeOrder)
 )
+
+/** 把图幅对齐偏移持久化到图幅自身（图幅自己存锚点与偏移） */
+async function persistOffsets(ids: string[]): Promise<void> {
+  const updates = ids
+    .map((id) => ({ id, alignOffset: offsets[id] ?? 0 }))
+    .filter((update) => {
+      const sketch = sketchState.sketches.find((item) => item.id === update.id)
+      return sketch && sketch.alignOffset !== update.alignOffset
+    })
+  if (updates.length > 0) {
+    await sketchStore.getState().persistOffsets(updates)
+  }
+}
+
+/** 重试重配：只处理待重配图幅，失败保住原锚点与偏移 */
+async function retryReconcile(): Promise<void> {
+  const { fixed, failed } = await reconcileStore.getState().retryPending()
+  if (fixed > 0) ElMessage.success(`重配成功 ${fixed} 张，已归入对应洞段，锚点与偏移保留`)
+  if (failed > 0) ElMessage.warning(`${failed} 张仍无洞段可归，已保住原锚点与偏移，待下次重试`)
+  if (fixed === 0 && failed === 0) ElMessage.info('当前没有待重配图幅')
+}
 
 function segmentOf(sketch: Sketch): string {
   const segment = segmentState.segments.find((item) => item.id === sketch.segmentId)
@@ -71,7 +99,7 @@ watch(
   mergeSketches,
   (list) => {
     list.forEach((sketch) => {
-      if (offsets[sketch.id] === undefined) offsets[sketch.id] = 0
+      if (offsets[sketch.id] === undefined) offsets[sketch.id] = sketch.alignOffset ?? 0
       if (snapped[sketch.id] === undefined) snapped[sketch.id] = false
     })
   },
@@ -86,16 +114,21 @@ const caveStations = computed(() =>
 )
 const { result: closureResult } = useClosureCheck(caveStations)
 
-/** 按桩号锚点自动吸附：以最小锚点桩号为原点，按桩号差换算横向偏移 */
-function autoAlign(): void {
+/** 按桩号锚点自动吸附：以最小锚点桩号为原点，按桩号差换算横向偏移；待重配图幅不参与 */
+async function autoAlign(): Promise<void> {
   const list = mergeSketches.value
   if (list.length === 0) {
     ElMessage.warning('当前洞穴暂无可拼合草图')
     return
   }
-  const base = Math.min(...list.map((sketch) => stakeToNumber(sketch.anchorStake)))
+  const alignable = list.filter((sketch) => !pendingIds.value.has(sketch.id))
+  if (alignable.length === 0) {
+    ElMessage.warning('当前图幅均待重配，请先重试重配')
+    return
+  }
+  const base = Math.min(...alignable.map((sketch) => stakeToNumber(sketch.anchorStake)))
   const logs: string[] = []
-  list.forEach((sketch) => {
+  alignable.forEach((sketch) => {
     const stake = stakeToNumber(sketch.anchorStake)
     const target = Math.round((stake - base) * PX_PER_METER)
     offsets[sketch.id] = target
@@ -103,7 +136,8 @@ function autoAlign(): void {
     logs.push(`${sketch.code} 锚点 ${sketch.anchorStake} → 偏移 ${target}px`)
   })
   snapLog.value = logs
-  ElMessage.success(`已按桩号锚点吸附 ${list.length} 张图幅`)
+  await persistOffsets(alignable.map((sketch) => sketch.id))
+  ElMessage.success(`已按桩号锚点吸附 ${alignable.length} 张图幅`)
 }
 
 function onMouseDown(sketch: Sketch, event: MouseEvent): void {
@@ -138,6 +172,10 @@ function onMouseMove(event: MouseEvent): void {
 }
 
 function onMouseUp(): void {
+  if (draggingId.value) {
+    // 拖动结束把对齐偏移写回图幅自身（锚点与偏移都由图幅保存）
+    persistOffsets([draggingId.value])
+  }
   draggingId.value = null
 }
 
@@ -149,6 +187,7 @@ interface MergeRow {
   anchorStake: string
   offset: number
   snapped: boolean
+  reconcile: string
 }
 
 const mergeRows = computed<MergeRow[]>(() =>
@@ -158,7 +197,8 @@ const mergeRows = computed<MergeRow[]>(() =>
     segment: segmentOf(sketch),
     anchorStake: sketch.anchorStake,
     offset: offsets[sketch.id] ?? 0,
-    snapped: snapped[sketch.id] ?? false
+    snapped: snapped[sketch.id] ?? false,
+    reconcile: pendingIds.value.has(sketch.id) ? '待重配' : '正常'
   }))
 )
 
@@ -182,7 +222,8 @@ function exportMergeTable(): void {
       { key: 'segment', label: '洞段' },
       { key: 'anchorStake', label: '锚点桩号' },
       { key: 'offset', label: '对齐偏移(px)' },
-      { key: 'snapped', label: '是否吸附' }
+      { key: 'snapped', label: '是否吸附' },
+      { key: 'reconcile', label: '重配状态' }
     ]
   )
   ElMessage.success('拼合顺序表已导出')
@@ -203,6 +244,19 @@ function exportMergeTable(): void {
         <el-button @click="exportMergeTable">导出拼合顺序表</el-button>
       </div>
     </div>
+
+    <el-alert
+      v-if="reconcileState.pendingSketches.length > 0"
+      type="warning"
+      show-icon
+      class="reconcile-banner"
+      :title="`${reconcileState.pendingSketches.length} 张图幅锚点失效待重配`"
+      description="桩号调整后锚点落在洞段区间外，已挑出等待重配；重配失败会保住原锚点与偏移，仅重试这些图幅，区间内测点闭合差不受影响。"
+    >
+      <div class="banner-actions">
+        <el-button size="small" type="primary" @click="retryReconcile">重试重配</el-button>
+      </div>
+    </el-alert>
 
     <div class="toolbar">
       <el-select v-model="selectedCaveId" placeholder="选择洞穴" style="width: 220px">
@@ -235,7 +289,8 @@ function exportMergeTable(): void {
           v-for="(sketch, index) in mergeSketches"
           :key="sketch.id"
           class="sheet-group"
-          @mousedown.prevent="onMouseDown(sketch, $event)"
+          :class="{ 'is-pending': pendingIds.has(sketch.id) }"
+          @mousedown.prevent="pendingIds.has(sketch.id) ? undefined : onMouseDown(sketch, $event)"
         >
           <rect
             :x="offsets[sketch.id] ?? 0"
@@ -243,9 +298,10 @@ function exportMergeTable(): void {
             :width="widthOf(sketch)"
             height="96"
             rx="6"
-            :fill="snapped[sketch.id] ? 'rgba(47,111,143,0.22)' : 'rgba(143,211,199,0.28)'"
-            :stroke="snapped[sketch.id] ? '#2f6f8f' : '#1f8a70'"
+            :fill="pendingIds.has(sketch.id) ? 'rgba(201,138,27,0.16)' : snapped[sketch.id] ? 'rgba(47,111,143,0.22)' : 'rgba(143,211,199,0.28)'"
+            :stroke="pendingIds.has(sketch.id) ? '#c98a1b' : snapped[sketch.id] ? '#2f6f8f' : '#1f8a70'"
             stroke-width="1.6"
+            :stroke-dasharray="pendingIds.has(sketch.id) ? '6 4' : '0'"
           />
           <text :x="(offsets[sketch.id] ?? 0) + 8" :y="62 + (index % 2) * 10" font-size="12" fill="#1f3a4d">
             {{ sketch.code }}
@@ -256,7 +312,17 @@ function exportMergeTable(): void {
           <text :x="(offsets[sketch.id] ?? 0) + 8" :y="96 + (index % 2) * 10" font-size="11" fill="#7a8896">
             1:{{ sketch.scale }} · {{ sketch.gridCount }} 格
           </text>
+          <text
+            v-if="pendingIds.has(sketch.id)"
+            :x="(offsets[sketch.id] ?? 0) + 8"
+            :y="112 + (index % 2) * 10"
+            font-size="11"
+            fill="#c98a1b"
+          >
+            待重配 · 锚点失效
+          </text>
           <line
+            v-else
             :x1="offsets[sketch.id] ?? 0"
             :y1="136 + (index % 2) * 10"
             :x2="(offsets[sketch.id] ?? 0) + 14"
@@ -317,6 +383,13 @@ function exportMergeTable(): void {
           </el-tag>
         </template>
       </el-table-column>
+      <el-table-column label="重配状态" width="120">
+        <template #default="{ row }: { row: MergeRow }">
+          <el-tag :type="row.reconcile === '正常' ? 'success' : 'warning'" size="small" effect="plain">
+            {{ row.reconcile }}
+          </el-tag>
+        </template>
+      </el-table-column>
       <el-table-column label="调整顺序" width="180">
         <template #default="{ $index }: { $index: number }">
           <el-button link type="primary" size="small" :disabled="$index === 0" @click="move($index, -1)">上移</el-button>
@@ -372,5 +445,14 @@ function exportMergeTable(): void {
 }
 .sheet-group {
   cursor: grab;
+}
+.sheet-group.is-pending {
+  cursor: not-allowed;
+}
+.reconcile-banner {
+  margin-bottom: 12px;
+}
+.banner-actions {
+  margin-top: 8px;
 }
 </style>

@@ -155,6 +155,9 @@ async function submit(): Promise<void> {
     author: form.author.trim(),
     mergeOrder: Number(form.mergeOrder) || 1,
     anchorStake: form.anchorStake.trim(),
+    alignOffset: existing?.alignOffset ?? 0,
+    reconcileStatus: existing?.reconcileStatus ?? 'ok',
+    reconcileReason: existing?.reconcileReason ?? '',
     imageNote: form.imageNote.trim()
   }
   await sketchStore.getState().save(sketch)
