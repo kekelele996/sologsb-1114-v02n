@@ -10,6 +10,7 @@ import { segmentStore } from '@/stores/segmentStore'
 import { stationStore } from '@/stores/stationStore'
 import { sketchStore } from '@/stores/sketchStore'
 import { toRadians } from '@/utils/survey'
+import { anchorWithinSegment } from '@/utils/reassign'
 import { uid } from '@/utils/id'
 
 const caveState = useStore(caveStore)
@@ -155,6 +156,10 @@ async function submit(): Promise<void> {
     author: form.author.trim(),
     mergeOrder: Number(form.mergeOrder) || 1,
     anchorStake: form.anchorStake.trim(),
+    alignOffset: existing?.alignOffset ?? 0,
+    // 锚点落在所属洞段区间外的一律标记待重配
+    anchorStatus:
+      currentSegment.value && anchorWithinSegment(form.anchorStake.trim(), currentSegment.value) ? 'ok' : 'pending',
     imageNote: form.imageNote.trim()
   }
   await sketchStore.getState().save(sketch)
@@ -177,6 +182,36 @@ async function removeSketch(sketch: Sketch): Promise<void> {
   await ElMessageBox.confirm(`确认删除草图「${sketch.code}」？`, '删除确认', { type: 'warning' })
   await sketchStore.getState().remove(sketch.id)
   ElMessage.success('草图记录已删除')
+}
+
+/** 待重配图幅：桩号改动后锚点落到区间外、或旧数据回填不上的那几张 */
+const pendingSketches = computed(() =>
+  sketchState.sketches.filter((sketch) => sketch.anchorStatus === 'pending')
+)
+
+function segmentLabelOf(sketch: Sketch): string {
+  if (!sketch.segmentId) return '未归属'
+  return segmentState.segments.find((segment) => segment.id === sketch.segmentId)?.code ?? '未归属'
+}
+
+const reassigning = ref(false)
+
+async function reassignPending(): Promise<void> {
+  reassigning.value = true
+  try {
+    const { reassigned, failed } = await sketchStore.getState().reassignPending(segmentState.segments)
+    if (failed.length === 0) {
+      ElMessage.success(`重配完成：${reassigned.length} 张图幅已按锚点挂回洞段`)
+    } else {
+      ElMessage.warning(
+        `重配完成：${reassigned.length} 张成功，${failed.length} 张锚点仍落不到任何区间，已保留原锚点与偏移，留待下次重试`
+      )
+    }
+  } catch {
+    ElMessage.error('重配过程出错，已按侧恢复：洞段档案留住新桩号，图幅保住原锚点与偏移')
+  } finally {
+    reassigning.value = false
+  }
 }
 </script>
 
@@ -293,6 +328,13 @@ async function removeSketch(sketch: Sketch): Promise<void> {
       </el-table-column>
       <el-table-column prop="author" label="绘制人" width="100" />
       <el-table-column prop="anchorStake" label="锚点桩号" width="130" />
+      <el-table-column label="锚点状态" width="100">
+        <template #default="{ row }: { row: Sketch }">
+          <el-tag :type="row.anchorStatus === 'ok' ? 'success' : 'warning'" size="small" effect="plain">
+            {{ row.anchorStatus === 'ok' ? '有效' : '待重配' }}
+          </el-tag>
+        </template>
+      </el-table-column>
       <el-table-column prop="imageNote" label="图片数据说明" min-width="200" show-overflow-tooltip />
       <el-table-column label="操作" width="130" fixed="right">
         <template #default="{ row }: { row: Sketch }">
@@ -301,6 +343,30 @@ async function removeSketch(sketch: Sketch): Promise<void> {
         </template>
       </el-table-column>
     </el-table>
+
+    <template v-if="pendingSketches.length > 0">
+      <div class="pending-head">
+        <h3 class="section-title">待重配图幅（{{ pendingSketches.length }} 张）</h3>
+        <el-button type="primary" size="small" :loading="reassigning" @click="reassignPending">
+          按锚点重配
+        </el-button>
+      </div>
+      <p class="page-sub">
+        以下图幅锚点已失效（桩号改动落到区间外，或旧数据升级时回填不上）；重配只处理这几张，
+        失败的会保留原锚点与对齐偏移，留待下次重试。
+      </p>
+      <el-table :data="pendingSketches" border stripe>
+        <el-table-column prop="code" label="草图编号" width="120" />
+        <el-table-column label="当前归属" width="120">
+          <template #default="{ row }: { row: Sketch }">{{ segmentLabelOf(row) }}</template>
+        </el-table-column>
+        <el-table-column prop="anchorStake" label="锚点桩号" width="140" />
+        <el-table-column label="对齐偏移" width="120">
+          <template #default="{ row }: { row: Sketch }">{{ row.alignOffset }} px</template>
+        </el-table-column>
+        <el-table-column prop="imageNote" label="图片数据说明" min-width="200" show-overflow-tooltip />
+      </el-table>
+    </template>
   </div>
 </template>
 
@@ -322,5 +388,10 @@ async function removeSketch(sketch: Sketch): Promise<void> {
   display: flex;
   gap: 8px;
   padding-left: 90px;
+}
+.pending-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 </style>

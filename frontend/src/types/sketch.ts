@@ -1,6 +1,10 @@
+/** 图幅锚点状态：ok = 锚点落在所属洞段区间内；pending = 锚点失效，待重配 */
+export type AnchorStatus = 'ok' | 'pending'
+
 /** Sketch 草图 */
 export interface Sketch {
   id: string
+  /** 所属洞段；空串表示未归属（旧数据回填不上的单独留着） */
   segmentId: string
   /** 草图编号 */
   code: string
@@ -14,6 +18,10 @@ export interface Sketch {
   mergeOrder: number
   /** 桩号对齐锚点 */
   anchorStake: string
+  /** 图幅自存的对齐偏移（拼合视图横向偏移，单位 px） */
+  alignOffset: number
+  /** 锚点状态：桩号改动后落到区间外的图幅标记为待重配 */
+  anchorStatus: AnchorStatus
   /** 图片数据说明 */
   imageNote: string
 }

@@ -71,7 +71,8 @@ watch(
   mergeSketches,
   (list) => {
     list.forEach((sketch) => {
-      if (offsets[sketch.id] === undefined) offsets[sketch.id] = 0
+      // 图幅自存对齐偏移：优先取记录里的持久化值
+      if (offsets[sketch.id] === undefined) offsets[sketch.id] = sketch.alignOffset ?? 0
       if (snapped[sketch.id] === undefined) snapped[sketch.id] = false
     })
   },
@@ -87,7 +88,7 @@ const caveStations = computed(() =>
 const { result: closureResult } = useClosureCheck(caveStations)
 
 /** 按桩号锚点自动吸附：以最小锚点桩号为原点，按桩号差换算横向偏移 */
-function autoAlign(): void {
+async function autoAlign(): Promise<void> {
   const list = mergeSketches.value
   if (list.length === 0) {
     ElMessage.warning('当前洞穴暂无可拼合草图')
@@ -103,7 +104,8 @@ function autoAlign(): void {
     logs.push(`${sketch.code} 锚点 ${sketch.anchorStake} → 偏移 ${target}px`)
   })
   snapLog.value = logs
-  ElMessage.success(`已按桩号锚点吸附 ${list.length} 张图幅`)
+  await sketchStore.getState().setAlignOffsets({ ...offsets })
+  ElMessage.success(`已按桩号锚点吸附 ${list.length} 张图幅，偏移已存回图幅记录`)
 }
 
 function onMouseDown(sketch: Sketch, event: MouseEvent): void {
@@ -138,6 +140,11 @@ function onMouseMove(event: MouseEvent): void {
 }
 
 function onMouseUp(): void {
+  if (draggingId.value) {
+    // 拖动结束，把该图幅的对齐偏移存回图幅记录
+    const id = draggingId.value
+    void sketchStore.getState().setAlignOffsets({ [id]: offsets[id] ?? 0 })
+  }
   draggingId.value = null
 }
 
@@ -147,6 +154,7 @@ interface MergeRow {
   code: string
   segment: string
   anchorStake: string
+  anchorStatus: Sketch['anchorStatus']
   offset: number
   snapped: boolean
 }
@@ -157,6 +165,7 @@ const mergeRows = computed<MergeRow[]>(() =>
     code: sketch.code,
     segment: segmentOf(sketch),
     anchorStake: sketch.anchorStake,
+    anchorStatus: sketch.anchorStatus,
     offset: offsets[sketch.id] ?? 0,
     snapped: snapped[sketch.id] ?? false
   }))
@@ -181,6 +190,7 @@ function exportMergeTable(): void {
       { key: 'code', label: '草图编号' },
       { key: 'segment', label: '洞段' },
       { key: 'anchorStake', label: '锚点桩号' },
+      { key: 'anchorStatus', label: '锚点状态' },
       { key: 'offset', label: '对齐偏移(px)' },
       { key: 'snapped', label: '是否吸附' }
     ]
@@ -307,6 +317,13 @@ function exportMergeTable(): void {
       <el-table-column prop="code" label="草图编号" width="120" />
       <el-table-column prop="segment" label="洞段" width="120" />
       <el-table-column prop="anchorStake" label="桩号对齐锚点" width="150" />
+      <el-table-column label="锚点状态" width="110">
+        <template #default="{ row }: { row: MergeRow }">
+          <el-tag :type="row.anchorStatus === 'ok' ? 'success' : 'warning'" size="small" effect="plain">
+            {{ row.anchorStatus === 'ok' ? '有效' : '待重配' }}
+          </el-tag>
+        </template>
+      </el-table-column>
       <el-table-column label="对齐偏移" width="120">
         <template #default="{ row }: { row: MergeRow }">{{ row.offset }} px</template>
       </el-table-column>

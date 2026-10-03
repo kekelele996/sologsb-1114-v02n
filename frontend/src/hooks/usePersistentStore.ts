@@ -3,9 +3,10 @@ import type { StoreApi } from 'zustand/vanilla'
 import Dexie, { type Table } from 'dexie'
 import type { Cave, Segment, Sketch, Station } from '@/types'
 import { computeHorizontal, computeVertical } from '@/utils/survey'
+import { anchorWithinSegment, findSegmentByAnchor } from '@/utils/reassign'
 
 /** IndexedDB 数据结构版本号（升级迁移时使用） */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export interface MetaRow {
   key: string
@@ -30,7 +31,7 @@ class CaveSurveyDb extends Dexie {
       meta: 'key'
     })
     // v2：旧版测点记录缺少水平距/垂距，迁移时由斜距 + 倾角补齐
-    this.version(SCHEMA_VERSION)
+    this.version(2)
       .stores({
         caves: 'id, name, region, archived',
         segments: 'id, caveId, code, type',
@@ -51,6 +52,32 @@ class CaveSurveyDb extends Dexie {
             }
           })
       })
+    // v3：草图图幅改为自存锚点状态与对齐偏移（表结构索引不变，仅迁移数据）。
+    // 早先的草图没记所属区间：segmentId 缺失或悬空时按锚点桩号回填，
+    // 回填不上的置为未归属单独留着；有归属的顺带校验锚点是否仍落在区间内。
+    this.version(3).upgrade(async (tx) => {
+      const segments = await tx.table<Segment, string>('segments').toArray()
+      await tx
+        .table<Sketch, string>('sketches')
+        .toCollection()
+        .modify((sketch) => {
+          if (!Number.isFinite(sketch.alignOffset)) sketch.alignOffset = 0
+          const linked = Boolean(sketch.segmentId) && segments.some((segment) => segment.id === sketch.segmentId)
+          if (!linked) {
+            const hit = findSegmentByAnchor(sketch.anchorStake, segments)
+            if (hit) {
+              sketch.segmentId = hit.id
+              sketch.anchorStatus = 'ok'
+            } else {
+              sketch.segmentId = ''
+              sketch.anchorStatus = 'pending'
+            }
+            return
+          }
+          const segment = segments.find((item) => item.id === sketch.segmentId)
+          sketch.anchorStatus = segment && anchorWithinSegment(sketch.anchorStake, segment) ? 'ok' : 'pending'
+        })
+    })
   }
 }
 
@@ -197,6 +224,8 @@ export async function seedDemoData(): Promise<void> {
       author: '陆昀',
       mergeOrder: 1,
       anchorStake: 'K0+000',
+      alignOffset: 0,
+      anchorStatus: 'ok',
       imageNote: '平面展开草图，坐标纸 48 格，含左壁支护标注'
     },
     {
@@ -208,6 +237,8 @@ export async function seedDemoData(): Promise<void> {
       author: '覃羽',
       mergeOrder: 2,
       anchorStake: 'K0+120',
+      alignOffset: 0,
+      anchorStatus: 'ok',
       imageNote: '竖井剖面草图，标注三处锚点'
     }
   ])

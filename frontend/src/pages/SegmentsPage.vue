@@ -124,9 +124,13 @@ async function submit(): Promise<void> {
     closed: form.closed,
     sketchNo: form.sketchNo.trim()
   }
-  await segmentStore.getState().save(segment)
+  const invalidated = await segmentStore.getState().save(segment)
   dialogVisible.value = false
-  ElMessage.success(existing ? '洞段已更新' : '洞段已建立')
+  if (invalidated > 0) {
+    ElMessage.warning(`桩号已更新，${invalidated} 张图幅锚点落到区间外，已转入待重配；区间内测点闭合差照算`)
+  } else {
+    ElMessage.success(existing ? '洞段已更新' : '洞段已建立')
+  }
 }
 
 async function applyBatchType(): Promise<void> {
